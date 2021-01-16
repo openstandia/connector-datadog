@@ -146,6 +146,7 @@ public class DatadogUserHandler extends AbstractDatadogHandler {
                         .setRequired(false)
                         .setMultiValued(true)
                         .setSubtype(AttributeInfo.Subtypes.STRING_CASE_IGNORE)
+                        .setReturnedByDefault(false)
                         .build());
 
         // Invitation
