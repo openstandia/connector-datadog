@@ -34,6 +34,7 @@ public class DatadogSchema {
 
     public final Schema schema;
     public final Map<String, AttributeInfo> userSchema;
+    public final Map<String, AttributeInfo> roleSchema;
 
     public DatadogSchema(DatadogConfiguration configuration, DatadogClient client) {
         this.configuration = configuration;
@@ -43,6 +44,9 @@ public class DatadogSchema {
 
         ObjectClassInfo userSchemaInfo = DatadogUserHandler.getUserSchema();
         schemaBuilder.defineObjectClass(userSchemaInfo);
+
+        ObjectClassInfo roleSchemaInfo = DatadogRoleHandler.getRoleSchema();
+        schemaBuilder.defineObjectClass(roleSchemaInfo);
 
         schemaBuilder.defineOperationOption(OperationOptionInfoBuilder.buildAttributesToGet(), SearchOp.class);
         schemaBuilder.defineOperationOption(OperationOptionInfoBuilder.buildReturnDefaultAttributes(), SearchOp.class);
@@ -54,26 +58,12 @@ public class DatadogSchema {
             userSchemaMap.put(info.getName(), info);
         }
 
+        Map<String, AttributeInfo> roleSchemaMp = new HashMap<>();
+        for (AttributeInfo info : roleSchemaInfo.getAttributeInfo()) {
+            roleSchemaMp.put(info.getName(), info);
+        }
+
         this.userSchema = Collections.unmodifiableMap(userSchemaMap);
-    }
-
-    public boolean isUserSchema(Attribute attribute) {
-        return userSchema.containsKey(attribute.getName());
-    }
-
-    public boolean isMultiValuedUserSchema(Attribute attribute) {
-        return userSchema.get(attribute.getName()).isMultiValued();
-    }
-
-    public boolean isUserSchema(AttributeDelta delta) {
-        return userSchema.containsKey(delta.getName());
-    }
-
-    public boolean isMultiValuedUserSchema(AttributeDelta delta) {
-        return userSchema.get(delta.getName()).isMultiValued();
-    }
-
-    public AttributeInfo getUserSchema(String attributeName) {
-        return userSchema.get(attributeName);
+        this.roleSchema = Collections.unmodifiableMap(roleSchemaMp);
     }
 }

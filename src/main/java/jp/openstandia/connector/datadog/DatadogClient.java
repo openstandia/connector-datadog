@@ -29,6 +29,8 @@ import java.util.Set;
 public interface DatadogClient {
     void test();
 
+    // User
+
     Uid createUser(DatadogSchema schema, Set<Attribute> createAttributes) throws AlreadyExistsException;
 
     void updateUser(DatadogSchema schema, Uid uid, Set<AttributeDelta> modifications, OperationOptions options) throws UnknownUidException;
@@ -40,6 +42,20 @@ public interface DatadogClient {
     void getUser(DatadogSchema schema, Uid uid, ResultsHandler handler, OperationOptions options, Set<String> attributesToGet, long queryPageSize);
 
     void getUser(DatadogSchema schema, Name name, ResultsHandler handler, OperationOptions options, Set<String> attributesToGet, long queryPageSize);
+
+    // Role
+
+    Uid createRole(DatadogSchema schema, Set<Attribute> createAttributes) throws AlreadyExistsException;
+
+    void updateRole(DatadogSchema schema, Uid uid, Set<AttributeDelta> modifications, OperationOptions options) throws UnknownUidException;
+
+    void deleteRole(DatadogSchema schema, Uid uid, OperationOptions options) throws UnknownUidException;
+
+    void getRoles(DatadogSchema schema, ResultsHandler handler, OperationOptions options, Set<String> attributesToGet, long queryPageSize);
+
+    void getRole(DatadogSchema schema, Uid uid, ResultsHandler handler, OperationOptions options, Set<String> attributesToGet, long queryPageSize);
+
+    void getRole(DatadogSchema schema, Name name, ResultsHandler handler, OperationOptions options, Set<String> attributesToGet, long queryPageSize);
 
     void close();
 }

@@ -17,7 +17,8 @@ package jp.openstandia.connector.datadog;
 
 import jp.openstandia.connector.datadog.rest.DatadogRESTClient;
 import org.identityconnectors.common.logging.Log;
-import org.identityconnectors.framework.common.exceptions.*;
+import org.identityconnectors.framework.common.exceptions.ConnectorException;
+import org.identityconnectors.framework.common.exceptions.InvalidAttributeValueException;
 import org.identityconnectors.framework.common.objects.*;
 import org.identityconnectors.framework.common.objects.filter.FilterTranslator;
 import org.identityconnectors.framework.spi.Configuration;
@@ -26,10 +27,10 @@ import org.identityconnectors.framework.spi.InstanceNameAware;
 import org.identityconnectors.framework.spi.PoolableConnector;
 import org.identityconnectors.framework.spi.operations.*;
 
-import javax.ws.rs.*;
-import javax.ws.rs.core.Response;
+import javax.ws.rs.NotFoundException;
 import java.util.Set;
 
+import static jp.openstandia.connector.datadog.DatadogRoleHandler.ROLE_OBJECT_CLASS;
 import static jp.openstandia.connector.datadog.DatadogUserHandler.USER_OBJECT_CLASS;
 
 /**
@@ -97,6 +98,9 @@ public class DatadogConnector implements PoolableConnector, CreateOp, UpdateDelt
 
         if (objectClass.equals(USER_OBJECT_CLASS)) {
             return new DatadogUserHandler(instanceName, configuration, client, schema);
+
+        } else if (objectClass.equals(ROLE_OBJECT_CLASS)) {
+            return new DatadogRoleHandler(instanceName, configuration, client, schema);
 
         } else {
             throw new InvalidAttributeValueException("Unsupported object class " + objectClass);
