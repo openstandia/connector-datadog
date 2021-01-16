@@ -21,10 +21,7 @@ import com.datadog.api.v2.client.ApiResponse;
 import com.datadog.api.v2.client.api.RolesApi;
 import com.datadog.api.v2.client.api.UsersApi;
 import com.datadog.api.v2.client.model.*;
-import jp.openstandia.connector.datadog.DatadogClient;
-import jp.openstandia.connector.datadog.DatadogConfiguration;
-import jp.openstandia.connector.datadog.DatadogSchema;
-import jp.openstandia.connector.datadog.DatadogUtils;
+import jp.openstandia.connector.datadog.*;
 import org.glassfish.jersey.apache.connector.ApacheConnectorProvider;
 import org.glassfish.jersey.client.ClientConfig;
 import org.glassfish.jersey.client.ClientProperties;
@@ -41,7 +38,9 @@ import java.net.Proxy;
 import java.net.URL;
 import java.util.*;
 import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
+import static jp.openstandia.connector.datadog.DatadogRoleHandler.*;
 import static jp.openstandia.connector.datadog.DatadogUserHandler.*;
 import static jp.openstandia.connector.datadog.DatadogUtils.*;
 import static org.identityconnectors.framework.common.objects.OperationalAttributes.ENABLE_NAME;
@@ -121,9 +120,7 @@ public class DatadogRESTClient implements DatadogClient {
         apiClient.configureApiKeys(secrets);
 
         // Configure timeout
-
         apiClient.setConnectTimeout(configuration.getConnectionTimeoutInMilliseconds());
-
         apiClient.setReadTimeout(configuration.getReadTimeoutInMilliseconds());
 
         // Keep the client instance per connector pool.
@@ -225,12 +222,11 @@ public class DatadogRESTClient implements DatadogClient {
 
     @Override
     public Uid createUser(DatadogSchema schema, Set<Attribute> createAttributes) throws AlreadyExistsException {
-        UsersApi apiInstance = new UsersApi(apiClient);
 
         UserCreateAttributes attrs = new UserCreateAttributes();
-        RelationshipToRoles roles = new RelationshipToRoles();
 
         List<Object> roleNames = null;
+        List<Object> roleIds = null;
         boolean doInvitation = false;
         boolean doDisable = false;
 
@@ -255,13 +251,17 @@ public class DatadogRESTClient implements DatadogClient {
 
             } else if (attr.is(ATTR_ROLE_NAMES)) {
                 roleNames = attr.getValue();
+
+            } else if (attr.is(ATTR_ROLES)) {
+                roleIds = attr.getValue();
             }
         }
 
-        UserCreateData userData = new UserCreateData();
-        userData.setType(UsersType.USERS);
-        userData.setAttributes(attrs);
+        // Make association
+        RelationshipToRoles roles = new RelationshipToRoles();
+        roles.data(new ArrayList<>());
 
+        // Association role by roleNames
         if (roleNames != null && !roleNames.isEmpty()) {
             Map<String, String> allRoles = getReverseAllRoleMap();
 
@@ -276,19 +276,30 @@ public class DatadogRESTClient implements DatadogClient {
                         .id(allRoles.get(roleName));
                 roles.addDataItem(roleData);
             }
-            UserRelationships relationships = new UserRelationships();
-            relationships.setRoles(roles);
-
-            userData.setRelationships(relationships);
+        }
+        // Association role by roleIds
+        if (roleIds != null && !roleIds.isEmpty()) {
+            for (Object roleId : roleIds) {
+                RelationshipToRoleData roleData = new RelationshipToRoleData()
+                        .type(RolesType.ROLES)
+                        .id(roleId.toString());
+                roles.addDataItem(roleData);
+            }
         }
 
-        UserCreateRequest newUser = new UserCreateRequest();
-        newUser.setData(userData);
+        UserCreateRequest body = new UserCreateRequest()
+                .data(new UserCreateData()
+                        .type(UsersType.USERS)
+                        .attributes(attrs)
+                        .relationships(new UserRelationships()
+                                .roles(roles)));
+
+        UsersApi api = new UsersApi(apiClient);
 
         try {
-            LOGGER.ok("[{0}] Create datadog user: {1}", instanceName, userData);
+            LOGGER.ok("[{0}] Create datadog user: {1}", instanceName, body);
 
-            ApiResponse<UserResponse> res = apiInstance.createUser().body(newUser).executeWithHttpInfo();
+            ApiResponse<UserResponse> res = api.createUser().body(body).executeWithHttpInfo();
             if (res.getStatusCode() != 201) {
                 throw new ConnectorIOException("Invalid status code when creating datadog user. status: " + res.getStatusCode());
             }
@@ -303,7 +314,10 @@ public class DatadogRESTClient implements DatadogClient {
                 invite(res.getData().getData().getId());
             }
 
-            return new Uid(res.getData().getData().getId(), new Name(res.getData().getData().getAttributes().getHandle()));
+            User created = res.getData().getData();
+
+            return new Uid(created.getId(), new Name(created.getAttributes().getHandle()));
+
         } catch (ApiException e) {
             throw handleApiException(e);
         }
@@ -367,7 +381,6 @@ public class DatadogRESTClient implements DatadogClient {
         try {
             UserUpdateAttributes datadogAttrs = new UserUpdateAttributes();
 
-            Map<String, String> allRoles = null;
             List<String> assignRoleIds = new ArrayList<>();
             List<String> unassignRoleIds = new ArrayList<>();
 
@@ -377,7 +390,7 @@ public class DatadogRESTClient implements DatadogClient {
             for (AttributeDelta delta : modifications) {
                 if (delta.is(Name.NAME)) {
                     // Can't modify handle attribute
-
+                    throw new InvalidAttributeValueException("Invalid datadog handle. It cannot be updated.");
                 }
                 if (delta.is(ENABLE_NAME)) {
                     datadogAttrs.setDisabled(!AttributeDeltaUtil.getBooleanValue(delta));
@@ -399,7 +412,7 @@ public class DatadogRESTClient implements DatadogClient {
                     doInvitation = AttributeDeltaUtil.getBooleanValue(delta);
 
                 } else if (delta.is(ATTR_ROLE_NAMES)) {
-                    allRoles = getReverseAllRoleMap();
+                    Map<String, String> allRoles = getReverseAllRoleMap();
 
                     List<Object> valuesToAdd = delta.getValuesToAdd();
                     if (valuesToAdd != null) {
@@ -422,30 +435,40 @@ public class DatadogRESTClient implements DatadogClient {
                             unassignRoleIds.add(roleId);
                         }
                     }
+
+                } else if (delta.is(ATTR_ROLES)) {
+                    List<Object> valuesToAdd = delta.getValuesToAdd();
+                    if (valuesToAdd != null) {
+                        for (Object o : valuesToAdd) {
+                            assignRoleIds.add(o.toString());
+                        }
+                    }
+
+                    List<Object> valuesToRemove = delta.getValuesToRemove();
+                    if (valuesToRemove != null) {
+                        for (Object o : valuesToRemove) {
+                            unassignRoleIds.add(o.toString());
+                        }
+                    }
                 }
             }
 
             // Update user attributes if needed
             if (doUpdateAttrs) {
+                UserUpdateRequest body = new UserUpdateRequest()
+                        .data(new UserUpdateData()
+                                .type(UsersType.USERS)
+                                .id(uid.getUidValue())
+                                .attributes(datadogAttrs));
 
-                UserUpdateData userData = new UserUpdateData();
-                userData.setType(UsersType.USERS);
-                userData.setId(uid.getUidValue()); // required
-                userData.setAttributes(datadogAttrs);
+                LOGGER.ok("[{0}] Update datadog user: {1}", instanceName, body);
 
-                UserUpdateRequest user = new UserUpdateRequest();
-                user.setData(userData);
-
-                LOGGER.ok("[{0}] Update datadog user: {1}", instanceName, user);
-
-                apiInstance.updateUser(uid.getUidValue()).body(user).executeWithHttpInfo();
+                apiInstance.updateUser(uid.getUidValue()).body(body).executeWithHttpInfo();
             }
 
             // Update role association if needed
-            if (allRoles != null) {
-                assignRole(allRoles, uid.getUidValue(), assignRoleIds);
-                unassignRole(allRoles, uid.getUidValue(), unassignRoleIds);
-            }
+            assignRole(uid.getUidValue(), assignRoleIds);
+            unassignRole(uid.getUidValue(), unassignRoleIds);
 
             // Send invitation if needed
             if (doInvitation && isPendingUser(uid.getUidValue())) {
@@ -473,35 +496,31 @@ public class DatadogRESTClient implements DatadogClient {
     }
 
 
-    protected void assignRole(Map<String, String> allRoles, String userId, List<String> roleIds) throws ApiException {
+    protected void assignRole(String userId, List<String> roleIds) throws ApiException {
+        RolesApi apiInstance = new RolesApi(apiClient);
+
         for (String roleId : roleIds) {
-            RolesApi apiInstance = new RolesApi(apiClient);
+            RelationshipToUser body = new RelationshipToUser()
+                    .data(new RelationshipToUserData()
+                            .id(userId));
 
-            RelationshipToUserData relationshipToUserData = new RelationshipToUserData();
-            relationshipToUserData.setId(userId);
+            LOGGER.ok("[{0}] Assign datadog role: {1}", instanceName, body);
 
-            RelationshipToUser relationshipToUser = new RelationshipToUser();
-            relationshipToUser.setData(relationshipToUserData);
-
-            LOGGER.ok("[{0}] Assign datadog role: {1}", instanceName, relationshipToUser);
-
-            apiInstance.addUserToRole(roleId).body(relationshipToUser).execute();
+            apiInstance.addUserToRole(roleId).body(body).execute();
         }
     }
 
-    protected void unassignRole(Map<String, String> allRoles, String userId, List<String> roleIds) throws ApiException {
+    protected void unassignRole(String userId, List<String> roleIds) throws ApiException {
+        RolesApi apiInstance = new RolesApi(apiClient);
+
         for (String roleId : roleIds) {
-            RolesApi apiInstance = new RolesApi(apiClient);
+            RelationshipToUser body = new RelationshipToUser()
+                    .data(new RelationshipToUserData()
+                            .id(userId));
 
-            RelationshipToUserData relationshipToUserData = new RelationshipToUserData();
-            relationshipToUserData.setId(userId);
+            LOGGER.ok("[{0}] Unassign datadog role: {1}", instanceName, body);
 
-            RelationshipToUser relationshipToUser = new RelationshipToUser();
-            relationshipToUser.setData(relationshipToUserData);
-
-            LOGGER.ok("[{0}] Unassign datadog role: {1}", instanceName, relationshipToUser);
-
-            apiInstance.removeUserFromRole(roleId).body(relationshipToUser).execute();
+            apiInstance.removeUserFromRole(roleId).body(body).execute();
         }
     }
 
@@ -568,7 +587,7 @@ public class DatadogRESTClient implements DatadogClient {
             UserResponse res = apiInstance.getUser(uid.getUidValue()).execute();
             User user = res.getData();
 
-            handler.handle(toConnectorObject(schema, user, attributesToGet, allowPartialAttributeValues, -1));
+            handler.handle(toConnectorObject(schema, user, attributesToGet, allowPartialAttributeValues, queryPageSize));
 
         } catch (ApiException e) {
             throw handleApiException(e);
@@ -583,6 +602,8 @@ public class DatadogRESTClient implements DatadogClient {
         UsersApi apiInstance = new UsersApi(apiClient);
 
         try {
+            // Unfortunately, datadog API doesn't support find by user name.
+            // We need to call listing all users API and find the user.
             UsersApi.APIlistUsersRequest req = apiInstance.listUsers()
                     .pageSize(queryPageSize)
                     .sort("email");
@@ -599,9 +620,182 @@ public class DatadogRESTClient implements DatadogClient {
                 }
 
                 for (User u : results) {
+                    // Case-insensitive name
                     if (u.getAttributes().getHandle().equalsIgnoreCase(name.getNameValue())) {
                         // Found
                         handler.handle(toConnectorObject(schema, u, attributesToGet, allowPartialAttributeValues, queryPageSize));
+                        return;
+                    }
+                }
+
+                start++;
+            }
+
+        } catch (ApiException e) {
+            throw handleApiException(e);
+        }
+    }
+
+    @Override
+    public Uid createRole(DatadogSchema schema, Set<Attribute> createAttributes) throws AlreadyExistsException {
+        Name roleName = AttributeUtil.getNameFromAttributes(createAttributes);
+        if (roleName == null) {
+            throw new InvalidAttributeValueException("Invalid datadog role name. It's required for create a role.");
+        }
+
+        RolesApi api = new RolesApi(apiClient);
+
+        try {
+            RoleCreateRequest body = new RoleCreateRequest()
+                    .data(new RoleCreateData()
+                            .type(RolesType.ROLES)
+                            .attributes(new RoleCreateAttributes()
+                                    .name(roleName.getNameValue())));
+
+            LOGGER.ok("[{0}] Create datadog role: {1}", instanceName, body);
+
+            ApiResponse<RoleCreateResponse> res = api.createRole().body(body).executeWithHttpInfo();
+
+            if (res.getStatusCode() != 201) {
+                throw new ConnectorIOException("Invalid status code when creating datadog user. status: " + res.getStatusCode());
+            }
+
+            RoleCreateResponseData created = res.getData().getData();
+
+            return new Uid(created.getId(), new Name(created.getAttributes().getName()));
+
+        } catch (ApiException e) {
+            throw handleApiException(e);
+        }
+    }
+
+    @Override
+    public void updateRole(DatadogSchema schema, Uid uid, Set<AttributeDelta> modifications, OperationOptions options) throws UnknownUidException {
+        AttributeDelta delta = AttributeDeltaUtil.getAttributeDeltaForName(modifications);
+        if (delta == null) {
+            throw new InvalidAttributeValueException("Invalid datadog role name. It's required for update a role.");
+        }
+        String newRoleName = AttributeDeltaUtil.getStringValue(delta);
+        if (newRoleName == null) {
+            throw new InvalidAttributeValueException("Invalid datadog role name. It's required for update a role.");
+        }
+
+        RolesApi api = new RolesApi(apiClient);
+
+        try {
+            RoleUpdateRequest body = new RoleUpdateRequest()
+                    .data(new RoleUpdateData()
+                            .type(RolesType.ROLES)
+                            .id(uid.getUidValue()) // required
+                            .attributes(new RoleUpdateAttributes()
+                                    .name(newRoleName)));
+
+            LOGGER.ok("[{0}] Update datadog role: {1}", instanceName, body);
+
+            api.updateRole(uid.getUidValue()).body(body).executeWithHttpInfo();
+
+        } catch (ApiException e) {
+            throw handleApiException(e);
+        }
+    }
+
+    @Override
+    public void deleteRole(DatadogSchema schema, Uid uid, OperationOptions options) throws UnknownUidException {
+        RolesApi api = new RolesApi(apiClient);
+
+        try {
+            LOGGER.ok("[{0}] Delete datadog role: {1}", instanceName, uid.getUidValue());
+
+            ApiResponse<Void> res = api.deleteRole(uid.getUidValue()).executeWithHttpInfo();
+            if (res.getStatusCode() != 204) {
+                throw new ConnectorIOException("Invalid status code when deleting datadog role. status: " + res.getStatusCode());
+            }
+
+        } catch (ApiException e) {
+            throw handleApiException(e);
+        }
+    }
+
+    @Override
+    public void getRoles(DatadogSchema schema, ResultsHandler handler, OperationOptions options, Set<String> attributesToGet, long queryPageSize) {
+        boolean allowPartialAttributeValues = shouldAllowPartialAttributeValues(options);
+
+        RolesApi api = new RolesApi(apiClient);
+
+        try {
+            RolesApi.APIlistRolesRequest req = api.listRoles()
+                    .pageSize(queryPageSize)
+                    .sort(RolesSort.NAME_ASCENDING);
+
+            long start = 0;
+
+            while (true) {
+                RolesResponse res = req.pageNumber(start).execute();
+
+                List<Role> results = res.getData();
+
+                if (results.size() == 0) {
+                    break;
+                }
+
+                for (Role r : results) {
+                    handler.handle(toConnectorObject(schema, r, attributesToGet, allowPartialAttributeValues, queryPageSize));
+                }
+
+                start++;
+            }
+
+        } catch (ApiException e) {
+            throw handleApiException(e);
+        }
+    }
+
+    @Override
+    public void getRole(DatadogSchema schema, Uid uid, ResultsHandler handler, OperationOptions options, Set<String> attributesToGet, long queryPageSize) {
+        boolean allowPartialAttributeValues = shouldAllowPartialAttributeValues(options);
+
+        RolesApi api = new RolesApi(apiClient);
+
+        try {
+            RoleResponse res = api.getRole(uid.getUidValue()).execute();
+            Role role = res.getData();
+
+            handler.handle(toConnectorObject(schema, role, attributesToGet, allowPartialAttributeValues, queryPageSize));
+
+        } catch (ApiException e) {
+            throw handleApiException(e);
+        }
+    }
+
+    @Override
+    public void getRole(DatadogSchema schema, Name name, ResultsHandler handler, OperationOptions options, Set<String> attributesToGet, long queryPageSize) {
+        boolean allowPartialAttributeValues = shouldAllowPartialAttributeValues(options);
+
+        RolesApi api = new RolesApi(apiClient);
+
+        try {
+            // Unfortunately, datadog API doesn't support find by role name.
+            // We need to call listing all roles API and find the role.
+            RolesApi.APIlistRolesRequest req = api.listRoles()
+                    .pageSize(queryPageSize)
+                    .sort(RolesSort.NAME_ASCENDING);
+
+            long start = 0;
+
+            while (true) {
+                RolesResponse res = req.pageNumber(start).execute();
+
+                List<Role> results = res.getData();
+
+                if (results.size() == 0) {
+                    break;
+                }
+
+                for (Role r : results) {
+                    // Case-insensitive name
+                    if (r.getAttributes().getName().equalsIgnoreCase(name.getNameValue())) {
+                        // Found
+                        handler.handle(toConnectorObject(schema, r, attributesToGet, allowPartialAttributeValues, queryPageSize));
                         return;
                     }
                 }
@@ -641,8 +835,8 @@ public class DatadogRESTClient implements DatadogClient {
         if (shouldReturn(attributesToGet, ENABLE_NAME)) {
             builder.addAttribute(AttributeBuilder.buildEnabled(!user.getAttributes().getDisabled()));
         }
-        if (shouldReturn(attributesToGet, ATTR_CREATED_AT)) {
-            builder.addAttribute(ATTR_CREATED_AT, DatadogUtils.toZoneDateTime(user.getAttributes().getCreatedAt()));
+        if (shouldReturn(attributesToGet, DatadogUserHandler.ATTR_CREATED_AT)) {
+            builder.addAttribute(DatadogUserHandler.ATTR_CREATED_AT, DatadogUtils.toZoneDateTime(user.getAttributes().getCreatedAt()));
         }
         if (shouldReturn(attributesToGet, ATTR_VERIFIED)) {
             builder.addAttribute(ATTR_VERIFIED, user.getAttributes().getVerified());
@@ -653,32 +847,70 @@ public class DatadogRESTClient implements DatadogClient {
 
         if (allowPartialAttributeValues) {
             // Suppress fetching roleNames
-            LOGGER.ok("[{0}] Suppress fetching roleNames because return partial attribute values is requested", instanceName);
+            LOGGER.ok("[{0}] Suppress fetching associations because return partial attribute values is requested", instanceName);
 
-            AttributeBuilder ab = new AttributeBuilder();
-            ab.setName(ATTR_ROLE_NAMES).setAttributeValueCompleteness(AttributeValueCompleteness.INCOMPLETE);
-            ab.addValue(Collections.EMPTY_LIST);
-            builder.addAttribute(ab.build());
+            Stream.of(ATTR_ROLE_NAMES, ATTR_ROLES).forEach(attrName -> {
+                AttributeBuilder ab = new AttributeBuilder();
+                ab.setName(attrName).setAttributeValueCompleteness(AttributeValueCompleteness.INCOMPLETE);
+                ab.addValue(Collections.EMPTY_LIST);
+                builder.addAttribute(ab.build());
+            });
 
         } else {
             if (attributesToGet == null) {
-                // Suppress fetching roleNames default
-                LOGGER.ok("[{0}] Suppress fetching roleNames because returned by default is true", instanceName);
+                // Suppress fetching associations default
+                LOGGER.ok("[{0}] Suppress fetching associations because returned by default is true", instanceName);
 
-            } else if (shouldReturn(attributesToGet, ATTR_ROLE_NAMES)) {
-                // Fetch roleNames
-                LOGGER.ok("[{0}] Fetching roleNames because attributes to get is requested", instanceName);
+            } else {
+                if (shouldReturn(attributesToGet, ATTR_ROLE_NAMES)) {
+                    // Fetch roleNames
+                    LOGGER.ok("[{0}] Fetching associations because attributes to get is requested", instanceName);
 
-                Map<String, String> allRoles = getAllRoleMap();
+                    Map<String, String> allRoles = getAllRoleMap();
 
-                List<RelationshipToRoleData> data = user.getRelationships().getRoles().getData();
-                List<String> roleNames = data.stream()
-                        .filter(r -> allRoles.containsKey(r.getId()))
-                        .map(r -> allRoles.get(r.getId()))
-                        .collect(Collectors.toList());
+                    List<RelationshipToRoleData> data = user.getRelationships().getRoles().getData();
+                    List<String> roleNames = data.stream()
+                            .filter(r -> allRoles.containsKey(r.getId()))
+                            .map(r -> allRoles.get(r.getId()))
+                            .collect(Collectors.toList());
 
-                builder.addAttribute(ATTR_ROLE_NAMES, roleNames);
+                    builder.addAttribute(ATTR_ROLE_NAMES, roleNames);
+                }
+                if (shouldReturn(attributesToGet, ATTR_ROLES)) {
+                    // Fetch roles
+                    LOGGER.ok("[{0}] Fetching roles because attributes to get is requested", instanceName);
+
+                    // Currently, we don't need fetch roleIds since they are already fetched by getting user or users API
+                    List<String> roleIds = user.getRelationships().getRoles().getData().stream()
+                            .map(r -> r.getId())
+                            .collect(Collectors.toList());
+
+                    builder.addAttribute(ATTR_ROLES, roleIds);
+                }
             }
+        }
+
+        return builder.build();
+    }
+
+    private ConnectorObject toConnectorObject(DatadogSchema schema, Role role,
+                                              Set<String> attributesToGet, boolean allowPartialAttributeValues, long queryPageSize) {
+        final ConnectorObjectBuilder builder = new ConnectorObjectBuilder()
+                .setObjectClass(ROLE_OBJECT_CLASS)
+                // Always returns "id"
+                .setUid(role.getId())
+                // Always returns "name"
+                .setName(role.getAttributes().getName());
+
+        // Metadata
+        if (shouldReturn(attributesToGet, DatadogRoleHandler.ATTR_CREATED_AT)) {
+            builder.addAttribute(DatadogRoleHandler.ATTR_CREATED_AT, DatadogUtils.toZoneDateTime(role.getAttributes().getCreatedAt()));
+        }
+        if (shouldReturn(attributesToGet, ATTR_MODIFIED_AT)) {
+            builder.addAttribute(DatadogRoleHandler.ATTR_MODIFIED_AT, DatadogUtils.toZoneDateTime(role.getAttributes().getModifiedAt()));
+        }
+        if (shouldReturn(attributesToGet, ATTR_USER_COUNT)) {
+            builder.addAttribute(ATTR_USER_COUNT, role.getAttributes().getUserCount());
         }
 
         return builder.build();

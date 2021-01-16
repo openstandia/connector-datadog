@@ -53,6 +53,7 @@ public class DatadogUserHandler extends AbstractDatadogHandler {
     public static final String ATTR_STATUS = "status"; // Pending, Active, Disabled
 
     // Role
+    // Don't use this attribute if using roles association
     public static final String ATTR_ROLE_NAMES = "roleNames"; // Datadog Admin Role, Datadog Read Only Role, Datadog Standard Role
 
     // Invitation
@@ -146,6 +147,7 @@ public class DatadogUserHandler extends AbstractDatadogHandler {
                         .setRequired(false)
                         .setMultiValued(true)
                         .setSubtype(AttributeInfo.Subtypes.STRING_CASE_IGNORE)
+                        .setReturnedByDefault(false)
                         .build());
 
         // Invitation
@@ -156,13 +158,13 @@ public class DatadogUserHandler extends AbstractDatadogHandler {
                         .build());
 
         // Association
-        // Not implemented yet because custom role is opt-in enterprise feature
-//        builder.addAttributeInfo(
-//                AttributeInfoBuilder.define(ATTR_ROLES)
-//                        .setRequired(false)
-//                        .setMultiValued(true)
-//                        .setSubtype(AttributeInfo.Subtypes.STRING_CASE_IGNORE)
-//                        .build());
+        builder.addAttributeInfo(
+                AttributeInfoBuilder.define(ATTR_ROLES)
+                        .setRequired(false)
+                        .setMultiValued(true)
+                        .setSubtype(AttributeInfo.Subtypes.STRING_CASE_IGNORE)
+                        .setReturnedByDefault(false)
+                        .build());
 
         ObjectClassInfo userSchemaInfo = builder.build();
 

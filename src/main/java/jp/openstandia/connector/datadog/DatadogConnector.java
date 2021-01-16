@@ -17,7 +17,8 @@ package jp.openstandia.connector.datadog;
 
 import jp.openstandia.connector.datadog.rest.DatadogRESTClient;
 import org.identityconnectors.common.logging.Log;
-import org.identityconnectors.framework.common.exceptions.*;
+import org.identityconnectors.framework.common.exceptions.ConnectorException;
+import org.identityconnectors.framework.common.exceptions.InvalidAttributeValueException;
 import org.identityconnectors.framework.common.objects.*;
 import org.identityconnectors.framework.common.objects.filter.FilterTranslator;
 import org.identityconnectors.framework.spi.Configuration;
@@ -26,10 +27,10 @@ import org.identityconnectors.framework.spi.InstanceNameAware;
 import org.identityconnectors.framework.spi.PoolableConnector;
 import org.identityconnectors.framework.spi.operations.*;
 
-import javax.ws.rs.*;
-import javax.ws.rs.core.Response;
+import javax.ws.rs.NotFoundException;
 import java.util.Set;
 
+import static jp.openstandia.connector.datadog.DatadogRoleHandler.ROLE_OBJECT_CLASS;
 import static jp.openstandia.connector.datadog.DatadogUserHandler.USER_OBJECT_CLASS;
 
 /**
@@ -37,7 +38,7 @@ import static jp.openstandia.connector.datadog.DatadogUserHandler.USER_OBJECT_CL
  *
  * @author Hiroyuki Wada
  */
-@ConnectorClass(configurationClass = DatadogConfiguration.class, displayNameKey = "NRI OpenStandia Keycloak Connector")
+@ConnectorClass(configurationClass = DatadogConfiguration.class, displayNameKey = "NRI OpenStandia Datadog Connector")
 public class DatadogConnector implements PoolableConnector, CreateOp, UpdateDeltaOp, DeleteOp, SchemaOp, TestOp, SearchOp<DatadogFilter>, InstanceNameAware {
 
     private static final Log LOG = Log.getLog(DatadogConnector.class);
@@ -90,13 +91,16 @@ public class DatadogConnector implements PoolableConnector, CreateOp, UpdateDelt
         return schema;
     }
 
-    protected AbstractDatadogHandler createKeycloakHandler(ObjectClass objectClass) {
+    protected AbstractDatadogHandler createHandler(ObjectClass objectClass) {
         if (objectClass == null) {
             throw new InvalidAttributeValueException("ObjectClass value not provided");
         }
 
         if (objectClass.equals(USER_OBJECT_CLASS)) {
             return new DatadogUserHandler(instanceName, configuration, client, schema);
+
+        } else if (objectClass.equals(ROLE_OBJECT_CLASS)) {
+            return new DatadogRoleHandler(instanceName, configuration, client, schema);
 
         } else {
             throw new InvalidAttributeValueException("Unsupported object class " + objectClass);
@@ -110,7 +114,7 @@ public class DatadogConnector implements PoolableConnector, CreateOp, UpdateDelt
         }
 
         try {
-            return createKeycloakHandler(objectClass).create(createAttributes);
+            return createHandler(objectClass).create(createAttributes);
 
         } catch (RuntimeException e) {
             throw processRuntimeException(e);
@@ -127,7 +131,7 @@ public class DatadogConnector implements PoolableConnector, CreateOp, UpdateDelt
         }
 
         try {
-            return createKeycloakHandler(objectClass).updateDelta(uid, modifications, options);
+            return createHandler(objectClass).updateDelta(uid, modifications, options);
 
         } catch (RuntimeException e) {
             throw processRuntimeException(e);
@@ -141,7 +145,7 @@ public class DatadogConnector implements PoolableConnector, CreateOp, UpdateDelt
         }
 
         try {
-            createKeycloakHandler(objectClass).delete(uid, options);
+            createHandler(objectClass).delete(uid, options);
 
         } catch (RuntimeException e) {
             throw processRuntimeException(e);
@@ -156,7 +160,7 @@ public class DatadogConnector implements PoolableConnector, CreateOp, UpdateDelt
     @Override
     public void executeQuery(ObjectClass objectClass, DatadogFilter filter, ResultsHandler resultsHandler, OperationOptions options) {
         try {
-            createKeycloakHandler(objectClass).query(filter, resultsHandler, options);
+            createHandler(objectClass).query(filter, resultsHandler, options);
 
         } catch (NotFoundException e) {
             // Don't throw UnknownUidException
@@ -201,27 +205,5 @@ public class DatadogConnector implements PoolableConnector, CreateOp, UpdateDelt
             return (ConnectorException) e;
         }
         return new ConnectorException(e);
-    }
-
-    private ConnectorException processKeycloakAdminRESTException(WebApplicationException e) {
-        if (e instanceof BadRequestException) {
-            return new InvalidAttributeValueException(e);
-        }
-        if (e instanceof NotFoundException) {
-            return new UnknownUidException(e);
-        }
-        if (e instanceof ClientErrorException) {
-            if (e.getResponse().getStatusInfo() == Response.Status.CONFLICT) {
-                return new AlreadyExistsException(e);
-            }
-            if (e.getResponse().getStatusInfo() == Response.Status.TOO_MANY_REQUESTS) {
-                return RetryableException.wrap(e.getMessage(), e);
-            }
-            throw new ConnectorIOException(e);
-        }
-        if (e instanceof InternalServerErrorException) {
-            return RetryableException.wrap(e.getMessage(), e);
-        }
-        throw new ConnectorIOException(e);
     }
 }
